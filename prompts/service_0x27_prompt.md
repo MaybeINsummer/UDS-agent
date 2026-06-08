@@ -4,24 +4,14 @@
 
 - **Service ID**: 0x27
 - **Service Name**: SecurityAccess
-- **正响应 SID**: 0x67（0x27 + 0x40）
+- **正响应 SID**: 0x67
 - **负响应格式**: `7F 27 <NRC>`
 - **子功能成对**: 奇数=RequestSEED, 偶数=SendKEY
 - **Seed 长度**: 通常 4 字节（从参数表读取）
 - **关键特性**: 复杂的安全机制，包含错误计数器、延时计时器、FAA flag
 - **通常不支持功能寻址**
-- **NRC 优先级链（服务级，Figure 0x27 专用）**:
-
-| 优先级 | NRC | 触发条件 |
-|--------|-----|---------|
-| 1 | 0x13 | 长度错误（SF_DL≠2） |
-| 2 | 0x12 | 子功能不支持（含 SPRMIB 0x83/0x84） |
-| 3 | 0x7E | 子功能在当前会话不支持 |
-| 4 | 0x33 | 安全访问未解锁 |
-| 5 | 0x24 | 序列错误（未请求 seed 直接发 key） |
-| 6 | 0x35 | 密钥错误（InvalidKey） |
-| 7 | 0x36 | 超过最大尝试次数 |
-| 8 | 0x37 | 锁定延时未到期 |
+- **NRC 优先级链**：共享 Figure 6，追加 0x35 > 0x36 > 0x37（InvalidKey > ExceededAttempts > TimeDelay）
+- **完整链**: 0x13 > 0x12 > 0x7E > 0x33 > 0x24 > 0x35 > 0x36 > 0x37
 
 ### 正响应格式
 
@@ -39,18 +29,13 @@
 | L4 | 0x07 | 0x08 | Level 4 |
 | L5 | 0x09 | 0x0A | Level 5 |
 
-### 典型 NRC
+### 典型 NRC — 均在共享 NRC 编码速查表中，此处仅列出 0x27 专有补充
 
 | NRC  | 含义 | 触发条件 |
 |------|------|---------|
-| 0x12 | Subfunction Not Supported | 发送了不支持的子功能（含 SPRMIB 镜像 0x83/0x84） |
-| 0x13 | Incorrect Message Length Or Invalid Format | 报文长度错误 |
-| 0x24 | RequiredTimeDelayNotExpired | 序列错误：未请求 seed 直接发 key |
-| 0x35 | InvalidKey | 密钥错误 |
-| 0x36 | ExceededNumberOfAttempts | 超过最大尝试次数（通常 3 次） |
-| 0x37 | RequiredTimeDelayNotExpired | 锁定延时未到期 |
-| 0x7E | Subfunction Not Supported In Active Session | 该子功能在当前会话下不支持 |
-| 0x7F | Service Not Supported In Active Session | 当前会话下整体不支持 0x27 服务 |
+| 0x35 | InvalidKey | 密钥错误（0x27 专有） |
+| 0x36 | ExceededNumberOfAttempts | 超过最大尝试次数（通常 3 次，0x27 专有） |
+| 0x37 | RequiredTimeDelayNotExpired | 锁定延时未到期（0x27 专有） |
 
 ### 特殊参数
 
@@ -63,14 +48,11 @@
 
 ---
 
-## 软件域规则
+## 软件域规则（共享规则补充）
 
-- **必须为 APP 和 Boot 两个软件域各独立生成完整用例集**
-- APP 域使用 ApplicationServices 表的 0x27 服务行
-- Boot 域使用 BootServices 表的 0x27 服务行
 - Boot 域的安全等级可能与 APP 域完全不同（如 APP 使用 L1/L2，Boot 使用 LevelFBL）
 - Boot 域需要完整镜像 APP 域的 Security Mechanism 测试
-- 两个域的用例集之间用 `---` 分隔，Boot 域用例编号接续 APP 域
+- 其余通用规则（APP/Boot 独立生成、用 `---` 分隔、参数表读取）见共享文件
 
 ## 寻址规则
 
@@ -116,13 +98,14 @@
 
 #### Check 规则
 
+> **种子请求的 Check 规则（强制）**：所有种子请求（27 01/03/05/07/09/11）必须使用 `AndCheckResp[PositiveResponse]` 语法，**不在 expected_output 中单独写 Check**——`AndCheckResp` 已内含正响应检查。种子数据为随机值不可预测，禁止写 `Check DiagData[67 XX XX XX XX XX]`。
+
 **A. 不支持的会话：**
-- `Check DiagData[7F 27 7F]Within[50]ms;`（会话不支持）
-- 或 `Check DiagData[7F 27 7E]Within[50]ms;`（子功能在当前会话不支持）
+- `AndCheckResp` 中使用对应的 NRC 码（`0x7F` 或 `0x7E`），不单独写 Check
 
 **B. 支持的会话正向：**
-- 第 2 步：Seed 正响应
-- 第 3 步：`Check DiagData[67 <KeySub>]Within[50]ms;`
+- 第 2 步（种子）：不单独写 Check（AndCheckResp 已内含检查）
+- 第 3 步（密钥）：`Check DiagData[67 <KeySub>]Within[50]ms;`
 
 ---
 
@@ -156,9 +139,9 @@
 **A. 仅请求 seed：**
 ```
 1. 进入 Extended 会话
-2. Send DiagBy[Physical]Data[27 <SeedSub>];
+2. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];
 ```
-Check: `Check DiagData[67 <SeedSub> <SeedData>]Within[50]ms;`
+> 种子请求使用 `AndCheckResp[PositiveResponse]`，不在 expected_output 中单独写 Check。
 
 **B. 直接发 key：**
 ```
@@ -198,7 +181,7 @@ Check: 第 2 步和第 3 步 ECU 返回的 seed 数据完全相同（`67 <SeedSu
 3. Send Security Right KeyBy[Physical]Level[<KeySub>];
 4. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];
 ```
-Check: 第 4 步 `Check DiagData[67 <SeedSub> 00 00 00 00]Within[50]ms;`（全零表示已解锁）
+> 步骤 2/4 为种子请求，使用 `AndCheckResp[PositiveResponse]` 已内含检查，不在 expected_output 中单独写 Check。步骤 4 的 expected_output 中**不写** `Check DiagData[67 XX XX XX XX XX]`。
 
 ---
 
@@ -252,14 +235,14 @@ A1: 最大尝试次数触发
 5. Send Security Wrong KeyBy[Physical]Level[<KeySub>];（第2次错误）
 6. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];
 7. Send Security Wrong KeyBy[Physical]Level[<KeySub>];（第3次错误 → 0x36）
-8. Send DiagBy[Physical]Data[27 <SeedSub>];（锁定后 → 0x37）
+8. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[0x37];（锁定后 → 0x37）
 ```
 
 A2: 等待延时后可请求
 ```
 （接 A1 之后）
 Delay[10000]ms;
-Send DiagBy[Physical]Data[27 <SeedSub>];（→ 正常返回 seed）
+Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（→ 正常返回 seed）
 ```
 
 A5: FAAflag=True 复位
@@ -268,12 +251,13 @@ A5: FAAflag=True 复位
 2. Set Voltage[0]V; Delay[1000]ms;
 3. Set Voltage[12]V; Delay[1000]ms;
 4. 进入会话
-5. Send DiagBy[Physical]Data[27 <SeedSub>];（→ 0x37，counter 保留）
+5. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[0x37];（→ 0x37，counter 保留）
 ```
 
 A6: FAAflag=False 复位
 ```
 同 A5，但第 5 步 → 正常返回 seed（counter 清零）
+5. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];
 ```
 
 **路径 B: 连续 seed 请求**
@@ -281,22 +265,24 @@ A6: FAAflag=False 复位
 B1: 最大 seed 请求次数
 ```
 1. 进入 Extended 会话
-2. Send DiagBy[Physical]Data[27 <SeedSub>];（第1次，正常）
-3. Send DiagBy[Physical]Data[27 <SeedSub>];（第2次，正常）
-4. Send DiagBy[Physical]Data[27 <SeedSub>];（第3次，正常）
-5. Send DiagBy[Physical]Data[27 <SeedSub>];（第4次 → 0x36）
+2. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（第1次，正常）
+3. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（第2次，正常）
+4. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（第3次，正常）
+5. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[0x36];（第4次 → 0x36）
 ```
 
 B2-B8: 类似 A2-A8 但使用连续 seed 请求路径
 
 #### Check 规则
 
-- 第 1-2 次错误密钥：`7F 27 35`（InvalidKey）
-- 第 3 次错误密钥：`7F 27 36`（ExceededAttempts）
-- 锁定后请求：`7F 27 37`（TimeDelay）
-- 延时到期后：正常返回 seed
-- FAAflag=True 复位后：`7F 27 37`（counter 保留）
-- FAAflag=False 复位后：正常返回 seed（counter 清零）
+> **种子/密钥步骤均使用 AndCheckResp 语法，不在 expected_output 中单独写 Check。**
+
+- 第 1-2 次错误密钥：AndCheckResp 内含 `7F 27 35`（InvalidKey），不单独写 Check
+- 第 3 次错误密钥：AndCheckResp 内含 `7F 27 36`（ExceededAttempts），不单独写 Check
+- 锁定后请求种子：AndCheckResp 内含 `7F 27 37`（TimeDelay），不单独写 Check
+- 延时到期后请求种子：AndCheckResp 内含 `PositiveResponse`（正常返回 seed），不单独写 Check
+- FAAflag=True 复位后请求种子：AndCheckResp 内含 `7F 27 37`（counter 保留），不单独写 Check
+- FAAflag=False 复位后请求种子：AndCheckResp 内含 `PositiveResponse`（正常返回 seed），不单独写 Check
 
 ---
 
@@ -318,12 +304,12 @@ B2-B8: 类似 A2-A8 但使用连续 seed 请求路径
 3. Delay[<S3 - delta>]ms;（如 4900ms）
 4. Send DiagBy[Physical]Data[3E 00];（TesterPresent 维持会话）
 5. Delay[<S3 - delta>]ms;
-6. Send DiagBy[Physical]Data[27 <SeedSub>];（检查安全状态）
+6. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（检查安全状态）
 ```
 
 #### Check 规则
 
-- 第 6 步：`Check DiagData[67 <SeedSub> 00 00 00 00]Within[50]ms;`（已解锁态，返回全零 seed）
+- 第 6 步（种子）：不单独写 Check（AndCheckResp 已内含检查）——**禁止**写 `Check DiagData[67 <SeedSub> 00 00 00 00]`
 
 ---
 
@@ -356,9 +342,9 @@ B2-B8: 类似 A2-A8 但使用连续 seed 请求路径
 3. Set Voltage[0]V; Delay[1000]ms;
 4. Set Voltage[12]V; Delay[1000]ms;
 5. 进入 Extended 会话
-6. Send DiagBy[Physical]Data[27 <SeedSub>];
+6. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[<ExpectedResp>];
 ```
-Check: 根据安全状态返回 seed 或 NRC
+> 根据 FAAflag 安全状态，`<ExpectedResp>` 为 `PositiveResponse`（FAAflag=False，counter 清零）或 `0x37`（FAAflag=True，counter 保留）。
 
 **B. Hardware Reset(11 01)：**
 ```
@@ -366,8 +352,9 @@ Check: 根据安全状态返回 seed 或 NRC
 2. 完成 seed/key 解锁
 3. Send DiagBy[Physical]Data[11 01]; Delay[2000]ms;
 4. 进入 Extended 会话
-5. Send DiagBy[Physical]Data[27 <SeedSub>];
+5. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[<ExpectedResp>];
 ```
+> 同 Power Reset，`<ExpectedResp>` 根据 FAAflag 取值。
 
 **C. Session Switch：**
 ```
@@ -375,13 +362,13 @@ Check: 根据安全状态返回 seed 或 NRC
 2. 完成 seed/key 解锁
 3. Send DiagBy[Physical]Data[10 01];（切回 Default → 安全状态重置）
 4. Send DiagBy[Physical]Data[10 03];
-5. Send DiagBy[Physical]Data[27 <SeedSub>];（→ 非全零 seed，已锁定）
+5. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（→ 非全零 seed，已锁定）
 ```
 
 **D. Software Reset(11 03)：**
 ```
 1. 进入 Extended 会话
-2. Send DiagBy[Physical]Data[27 <SeedSub>];（验证正常请求 seed）
+2. Send DiagBy[Physical]Data[27 <SeedSub>]AndCheckResp[PositiveResponse];（验证正常请求 seed）
 ```
 
 ---
@@ -546,46 +533,81 @@ Boot 域生成与 APP 域类似结构的测试集，但有以下差异：
 
 ## 会话进入标准路径
 
-| 目标会话 | APP 域标准进入步骤 | Boot 域标准进入步骤 |
-|---------|-------------------|-------------------|
-| Default（0x01） | `Send DiagBy[Physical]Data[10 01];` | `Send DiagBy[Physical]Data[10 01];` |
-| Extended（0x03） | `Send DiagBy[Physical]Data[10 03];` | `Send DiagBy[Physical]Data[10 03];` |
-| Programming（0x02） | `10 03 → 31 01 02 03 → 10 02` | `10 03 → 31 01 02 03 → 10 02` |
+见共享文件。0x27 无额外覆盖规则。
 
 ---
 
 ## 输出格式要求
 
-1. **输出格式严格为 pipe table**，列顺序：`| Case ID | Case名称 | 测试步骤 | 预期输出 |`
-2. **步骤中换行使用 `<br>` 标记**，不用 `\n`
-3. **不要生成任何"参数提取结果"或"分析"段落**，直接输出测试用例表格
-4. **每个分类标题使用 `## N.N` 格式**，如 `## 1.1 Session Layer Test`、`## 1.2 Secure Access Process Test`
-5. **各大组之间用 `---` 分隔**
-6. **无符合条件的用例时不生成该分类**
+见共享文件。额外规则：**每个分类标题使用 `## N.N` 格式**，如 `## 1.1 Session Layer Test`、`## 1.2 Secure Access Process Test`。
 
-### 输出示例
+### 步骤序号强制规则（重要）
 
-```markdown
-# 1. Application Service_Physical Addressing
+#### 两个字段的职责划分
 
-## 1.1 Session Layer Test
+> **`test_procedure` 只写"操作动作"，`expected_output` 只写"Check 检查"，两者共用同一套序号，Check 的序号与对应 Send 步骤编号一致。**
 
-| Case ID | Case名称 | 测试步骤 | 预期输出 |
-|---------|---------|---------|---------|
-| Diag_0x27_Phy_001 | Default Session nonsupport 0x27 Service security access level 1 Negativecase-$27 | 1.Send DiagBy[Physical]Data[10 01];<br>2.Send DiagBy[Physical]Data[27 01]AndCheckResp[0x7F]; | 2.Check DiagData[7F 27 7F]Within[50]ms; |
-| Diag_0x27_Phy_002 | Extended Session support 0x27 Service security access level 1 PositiveResponsecase-$27 | 1.Send DiagBy[Physical]Data[10 03];<br>2.Send DiagBy[Physical]Data[27 01]AndCheckResp[PositiveResponse];<br>3.Send Security Right KeyBy[Physical]Level[0x02]; | 2.Check DiagData[67 01 XX XX XX XX]Within[50]ms;<br>3.Check DiagData[67 02]Within[50]ms; |
+| 字段 | 写什么 | 不写什么 |
+|------|--------|---------|
+| `test_procedure` | Send / Delay / Set / Change 等**操作** | 不写 Check（Check 放到 expected_output） |
+| `expected_output` | Check DiagData / Check No_Response 等**检查** | 不写 Send / Delay / Set |
+
+**序号规则：**
+- `test_procedure` 步骤按 `1.` `2.` `3.` ... 顺序编号
+- `expected_output` 的 Check 编号与 `test_procedure` 中对应 Send 步骤编号**完全一致**
+- 没有 Check 的步骤（`Delay`、`Set Voltage` 等）在 `expected_output` 中跳过，序号不连续是正常的
+- `AndCheckResp[...]` 步骤在 `test_procedure` 中计入序号，但**不在** `expected_output` 中单独出现（已内含检查）
+
+**正确格式示例（以 session 进入 + seed/key 解锁为例）：**
 ```
+test_procedure:
+  1.Send DiagBy[Physical]Data[10 01];
+  2.Delay[1000]ms;
+  3.Send DiagBy[Physical]Data[10 03];
+  4.Send DiagBy[Physical]Data[27 01]AndCheckResp[PositiveResponse];
+  5.Send Security Right KeyBy[Physical]Level[02];
+
+expected_output:
+  1.Check DiagData[50 01 XX XX XX XX]Within[50]ms;
+  3.Check DiagData[50 03 XX XX XX XX]Within[50]ms;
+  5.Check DiagData[67 02]Within[50]ms;
+```
+说明：步骤 2（Delay）无 Check 跳过；步骤 4 为种子请求使用 `AndCheckResp` 已内含检查，不在 expected_output 中单独列出；步骤 5 为密钥请求，Check 写 `67 <KeySub>`（仅 1 字节确认）。序号 1/3/5 对应 test_procedure 中对应步骤编号。
+
+### 种子请求（Seed）处理规则（强制）
+
+> **所有种子请求（27 <SeedSub>，即 27 01 / 27 03 / 27 05 / 27 07 / 27 09 / 27 11）必须使用 `AndCheckResp[PositiveResponse]` 或 `AndCheckResp[<NRC>]` 语法，**严禁**在 expected_output 中单独写 Check 检查种子响应数据。**
+
+**原因**：种子数据由 ECU 随机生成（通常 4 字节），测试端不可预测其具体值，无法精确写入 `Check DiagData[67 XX XX XX XX XX]`。
+
+**规则：**
+1. 种子请求正响应：`Send DiagBy[Physical]Data[27 01]AndCheckResp[PositiveResponse];`
+2. 种子请求负响应：`Send DiagBy[Physical]Data[27 01]AndCheckResp[0x37];`（示例：锁定后返回 0x37）
+3. expected_output 中**不出现**种子步骤的 Check 行（编号跳过）
+
+**禁止格式示例（错误）：**
+- `test_procedure: 2.Send DiagBy[Physical]Data[27 01];` 配合 `expected_output: 2.Check DiagData[67 01 XX XX XX XX]Within[50]ms;`（**严禁**：种子数据不可预测，且 AndCheckResp 已处理）
+
+**正确格式示例：**
+- `test_procedure: 2.Send DiagBy[Physical]Data[27 01]AndCheckResp[PositiveResponse];` → expected_output 中**不写**第 2 步的 Check
+- `test_procedure: 5.Send DiagBy[Physical]Data[27 03]AndCheckResp[0x37];` → expected_output 中**不写**第 5 步的 Check
+**错误格式示例（禁止）：**
+- `test_procedure` 中混入 Check 语句（如 `2.Check DiagData[...]`）——Check 必须在 `expected_output`
+- `expected_output` 只写最后一条 Check，忽略前面所有步骤的 Check
+- 使用 `Step1:` 格式（禁止，必须用 `1.`）
+- 序号与内容之间有空格（`1. Send` 禁止，必须是 `1.Send`）
 
 ## 生成注意事项
 
-1. **Case ID 不可重复**，物理寻址 `Diag_0x27_Phy_001` 起递增，功能寻址 `Diag_0x27_Fun_001` 起递增
-2. **编号从 001 开始**，顺序为：APP Physical → APP Functional → Boot Physical → Boot Functional
-3. **安全等级映射必须从参数表读取**，不写死
-4. **错误密钥序列**: 35 → 35 → 36 → 37（2 次 InvalidKey 后第 3 次 ExceededAttempts）
-5. **SPRMIB 0x83/0x84 返回 NRC 0x12**
-6. **FAAcounter = 3 后锁定，只有成功 Unlock 或 TimerLocked 超时才能清零**
-7. **Boot 域必须完整镜像 APP 域的 Security Mechanism 测试**
-8. **ECU Reset 包含 Software Reset(11 03)**
+> 通用规则（Case ID 不可重复、pipe table 格式、`<br>` 换行、每 Send 有 Check 等）见共享文件。
+
+1. **编号从 001 开始**，顺序为：APP Physical → APP Functional → Boot Physical → Boot Functional
+2. **安全等级映射必须从参数表读取**，不写死
+3. **错误密钥序列**: 35 → 35 → 36 → 37（2 次 InvalidKey 后第 3 次 ExceededAttempts）
+4. **SPRMIB 0x83/0x84 返回 NRC 0x12**
+5. **FAAcounter = 3 后锁定，只有成功 Unlock 或 TimerLocked 超时才能清零**
+6. **Boot 域必须完整镜像 APP 域的 Security Mechanism 测试**
+7. **ECU Reset 包含 Software Reset(11 03)**
 
 ---
 

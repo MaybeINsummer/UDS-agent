@@ -4,8 +4,6 @@
 
 - **Service ID**: 0x28
 - **Service Name**: CommunicationControl
-- **正响应 SID**: 0x68（0x28 + 0x40）
-- **负响应格式**: `7F 28 <NRC>`
 - **请求格式**: `28 <Sub> <communicationType>`
 - **子功能**: 0x00(EnableRxAndTx), 0x01(EnableRxAndDisableTx), 0x02(DisableRxAndEnableTx), 0x03(DisableRxAndTx)
 - **communicationType**: 01=NormalMsg, 02=NetworkMgmt, 03=Both
@@ -25,33 +23,43 @@
 
 - `68 <Sub>`（仅确认，无额外 payload）
 
-### 典型 NRC
-
-| NRC  | 含义 | 触发条件 |
-|------|------|---------|
-| 0x12 | Subfunction Not Supported | 发送了不支持的子功能 |
-| 0x13 | Incorrect Message Length Or Invalid Format | 报文长度错误（SF_DL ≠ 3） |
-| 0x22 | Conditions Not Correct | 前置条件不满足 |
-| 0x31 | Request Out Of Range | communicationType 不支持 |
-| 0x7E | Subfunction Not Supported In Active Session | 该子功能在当前会话下不支持 |
-| 0x7F | Service Not Supported In Active Session | 当前会话下不支持 0x28 服务 |
-
 ---
 
-## 软件域规则
+## Timing 参数读取规则（必须执行，生成前先提取）
 
-- **必须为 APP 和 Boot 两个软件域各独立生成完整用例集**
-- APP 域使用 ApplicationServices 表的 0x28 服务行
-- Boot 域使用 BootServices 表的 0x28 服务行
-- 若 Boot 域不支持 0x28，仍需生成负向用例（Boot 所有测试预期 7F 28 7F）
-- 两个域的用例集之间用 `---` 分隔，Boot 域用例编号接续 APP 域
+> **0x10 会话进入的正响应格式为 `50 <Sub> <P2_H> <P2_L> <P2*_H> <P2*_L>`，其中 P2/P2* 字节必须从参数表精确读取，禁止使用占位符。**
 
-## 寻址规则
+### 读取来源优先级（按顺序查找，取第一个有值的来源）
 
-- **Physical 寻址**：生成完整测试集
-- **Functional 寻址**：无论是否支持 Functional Request，均生成完整的功能寻址用例集
-- Functional 寻址用例集中，所有测试步骤使用 `[Function]` 发送，所有预期输出为 `Check No_Response Within[1000]ms;`
-- 功能寻址用例集是物理寻址用例集的完整镜像
+**第 1 优先：`时序参数` sheet**
+- 直接读取 `P2Server Max`（单位 ms）和 `P2*Server Max`（单位 ms）字段
+- 编码：`P2ms → 十进制转 2 字节 hex`；`P2*ms / 10 → 十进制转 2 字节 hex`
+- 示例：P2=50ms → `00 32`；P2\*=2000ms → `200 → 00 C8`；P2\*=5000ms → `500 → 01 F4`
+
+**第 2 优先：`时序参数` sheet 为空时，从已生成的其他服务测试结果反推**
+- 若同一输入文件已生成过 0x10 服务的测试用例，从其 `expected_output` 中读取 `50 01 XX XX XX XX` 的实际值直接复用
+- 例如已有 `Check DiagData[50 01 00 32 00 C8]`，则 P2=`00 32`，P2\*=`00 C8`
+
+**第 3 优先：从输入 Excel 文本中的 `支持的服务` sheet 查找 0x10 行的备注列**
+- 部分项目在备注列注明了 P2/P2\* 值，需仔细检索
+
+**第 4 优先（兜底）：从同次生成上下文中读取其他服务已用过的 timing 值**
+- 若同次生成中其他服务（如 0x27、0x11）已写出了 `50 0x XX XX XX XX` 的实际值，直接复用相同的 P2/P2\* 字节
+
+> **严禁在没有确认实际值的情况下写 `50 01 XX XX XX XX` 或 `50 01`（仅 SID + 子功能，缺少 timing 字节）。** 必须写出完整的 6 字节正响应。
+
+### 0x10 正响应格式
+
+```
+Check DiagData[50 01 <P2_H> <P2_L> <P2*_H> <P2*_L>]Within[50]ms;
+Check DiagData[50 03 <P2_H> <P2_L> <P2*_H> <P2*_L>]Within[50]ms;
+Check DiagData[50 02 <P2_H> <P2_L> <P2*_H> <P2*_L>]Within[50]ms;
+```
+
+**错误示例（禁止）：**
+- `Check DiagData[50 01]Within[50]ms;` — 缺少 timing 字节
+- `Check DiagData[50 01 XX XX XX XX]Within[50]ms;` — XX 是占位符，不是实际值
+- `Check DiagData[50 03 00 32 01 F4]Within[50]ms;` — 若实际 P2\*=2000ms，正确应为 `00 32 00 C8`，不能混用其他项目的值
 
 ---
 
@@ -507,35 +515,52 @@ Send DiagBy[Physical]Data[28 03 01]WithLen[2];
 
 ---
 
-## 会话进入标准路径
+## 输出格式要求
 
-为统一生成，进入各会话的标准路径如下：
+**输出格式严格为 pipe table**，列顺序：`| Case ID | Case名称 | 测试步骤 | 预期输出 |`，步骤中换行使用 `<br>` 标记，不用 `\n`。
 
-| 目标会话 | 标准进入步骤 |
-|---------|------------|
-| Default（0x01） | `Send DiagBy[Physical]Data[10 01];` |
-| Extended（0x03） | `Send DiagBy[Physical]Data[10 01];` → `Delay[1000]ms;` → `Send DiagBy[Physical]Data[10 03];` |
-| Programming（0x02） | `Send DiagBy[Physical]Data[10 01];` → `Delay[1000]ms;` → `Send DiagBy[Physical]Data[10 03];` → `Send DiagBy[Physical]Data[31 01 02 03];` → `Send DiagBy[Physical]Data[10 02];` |
+### 步骤序号强制规则（重要）
 
-注意：Programming Session 进入路径使用 `31 01 02 03`（RoutineControl StartRoutine），不是直接 `10 02`。
+#### 两个字段的职责划分
 
----
+> **`test_procedure` 只写"操作动作"，`expected_output` 只写"Check 检查"，两者共用同一套序号，Check 的序号与对应 Send 步骤编号一致。**
 
-## 生成注意事项
+| 字段 | 写什么 | 不写什么 |
+|------|--------|---------|
+| `test_procedure` | Send / Delay / Set / Change 等**操作** | 不写 Check（Check 放到 expected_output） |
+| `expected_output` | Check DiagData / Check No_Response / Check MsgInexist / Check MsgExist 等**检查** | 不写 Send / Delay / Set |
 
-1. **Case ID 不可重复**，物理寻址 `Diag_0x28_Phy_001` 起递增，功能寻址 `Diag_0x28_Fun_001` 起递增
-2. **编号从 001 开始**，优先编写所有 Physical 用例，再编写 Functional 用例
-3. **每个 Send 都要有对应 Check**，除以下豁免：
-   - `Delay[...]ms` 不写 Check
-   - 带 `AndCheckResp[...]` 的发送函数不单独写 Check
-4. **禁用后必须验证 MsgInexist**，恢复后必须验证 MsgExist
-5. **被控报文 ID 从参数表读取**（MonitoredMsgId，如 0x1B），不写死
-6. **输出格式严格为 pipe table**，列顺序：`| Case ID | Case名称 | 测试步骤 | 预期输出 |`
-7. **顶级标题使用 `#`**：如 `# 1. Application Service_Physical Addressing`、`# 2. Application Service_Functional Addressing` 等
-8. **分类标题使用 `##`**：如 `## 1.1 Session Layer Test` 等
-9. **各大组之间用 `---` 分隔**
-10. **无符合条件的用例时使用 `>` 引用**
-11. **步骤中换行使用 `<br>` 标记**，不用 `\n`
+**序号规则：**
+- `test_procedure` 步骤按 `1.` `2.` `3.` ... 顺序编号，格式为 `1.内容`，**中间无空格、无冒号**
+- `expected_output` 的 Check 编号与 `test_procedure` 中对应 Send 步骤编号**完全一致**
+- 没有 Check 的步骤（`Delay`、`Set Voltage` 等）在 `expected_output` 中跳过，序号不连续是正常的
+- `AndCheckResp[...]` 步骤在 `test_procedure` 中计入序号，但**不在** `expected_output` 中单独出现（已内含检查）
+- `Check MsgInexist[...]` / `Check MsgExist[...]` 在 `test_procedure` 中计入序号，不在 `expected_output` 中重复出现
+
+**正确格式示例（以进入 Extended 会话 + 发送 0x28 为例）：**
+```
+test_procedure:
+  1.Send DiagBy[Physical]Data[10 01];
+  2.Delay[1000]ms;
+  3.Send DiagBy[Physical]Data[10 03];
+  4.Send DiagBy[Physical]Data[28 03 01];
+  5.Check MsgInexist[0x21F];
+  6.Send DiagBy[Physical]Data[28 00 01];
+  7.Check MsgExist[0x21F];
+
+expected_output:
+  1.Check DiagData[50 01 <P2_H> <P2_L> <P2*_H> <P2*_L>]Within[50]ms;
+  3.Check DiagData[50 03 <P2_H> <P2_L> <P2*_H> <P2*_L>]Within[50]ms;
+  4.Check DiagData[68 03]Within[50]ms;
+  6.Check DiagData[68 00]Within[50]ms;
+```
+说明：步骤 2（Delay）无 Check 跳过；步骤 5/7（MsgInexist/MsgExist）本身是检查动作，不在 expected_output 中重复；序号 1/3/4/6 与 test_procedure 对应步骤一致。
+
+**错误格式示例（禁止）：**
+- `Step1: Send DiagBy[Physical]Data[10 03];`（**严禁使用 `Step1:` 格式**）
+- `test_procedure` 中混入 Check 语句——Check 必须在 `expected_output`
+- `expected_output` 只写最后一条 Check，忽略前面所有步骤的 Check
+- `1. Send DiagBy[Physical]Data[10 03];`（序号与内容之间不得有空格）
 
 ---
 

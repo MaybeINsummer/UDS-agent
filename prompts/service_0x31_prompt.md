@@ -4,8 +4,6 @@
 
 - **Service ID**: 0x31
 - **Service Name**: RoutineControl
-- **正响应 SID**: 0x71（0x31 + 0x40）
-- **负响应格式**: `7F 31 <NRC>`
 - **子功能**: 01(StartRoutine), 02(StopRoutine), 03(RequestRoutineResults)
 - **请求格式**: `31 <Sub> <RID_H> <RID_L> [+ Routine Option 数据]`
 - **合法 SF_DL**: 4 + Option 数据长度（最小 4：SID + Sub + RID 2 字节）
@@ -30,20 +28,54 @@
   - 如 CheckProgrammingPreCondition: 0x00=正常, 0x01=异常
   - 如 DimmingControl: 0x00=correct, 0x01=incorrect
 
-### 典型 NRC
-
-| NRC  | 含义 | 触发条件 |
-|------|------|---------|
-| 0x12 | Subfunction Not Supported | 发送了不支持的子功能 |
-| 0x13 | Incorrect Message Length Or Invalid Format | 报文长度错误 |
-| 0x22 | Conditions Not Correct | 前置条件不满足（如电压异常） |
-| 0x24 | RequestSequenceError | 序列错误 |
-| 0x31 | Request Out Of Range | RID 不支持或不存在 |
-| 0x33 | Security Access Denied | 需要安全解锁但未解锁 |
-| 0x7E | Subfunction Not Supported In Active Session | 该子功能在当前会话下不支持 |
-| 0x7F | Service Not Supported In Active Session | 当前会话下不支持 0x31 服务 |
-
 ---
+
+
+1. **顶级标题使用 `#`**：如 `# 1. Application Service_Physical Addressing`、`# 2. Application Service_Functional Addressing`、`# 3. Boot Service_Physical Addressing`、`# 4. Boot Service_Functional Addressing`
+2. **分类标题使用 `##`**：如 `## 1.1 Session Layer Test`、`## 1.2 SPRMIB Test`、`## 1.3 Secure Access Test` 等
+3. **各大组之间用 `---` 分隔**
+4. **无符合条件的用例时使用 `>` 引用**：如 `> App 域 0x11 所有子功能... 无符合条件的用例。`
+5. **输出格式严格为 pipe table**，列顺序：`| Case ID | Case名称 | 测试步骤 | 预期输出 |`
+6. **步骤中换行使用 `<br>` 标记**，不用 `\n`
+7. **不要生成任何"参数提取结果"或"分析"段落**，直接输出测试用例表格
+
+#### 步骤序号强制规则（重要）
+
+#### 两个字段的职责划分
+
+> **`test_procedure` 只写"操作动作"，`expected_output` 只写"Check 检查"，两者共用同一套序号，Check 的序号与对应 Send 步骤编号一致。**
+
+| 字段 | 写什么 | 不写什么 |
+|------|--------|---------|
+| `test_procedure` | Send / Delay / Set / Change 等**操作** | 不写 Check（Check 放到 expected_output） |
+| `expected_output` | Check DiagData / Check No_Response 等**检查** | 不写 Send / Delay / Set |
+
+**序号规则：**
+- `test_procedure` 步骤按 `1.` `2.` `3.` ... 顺序编号
+- `expected_output` 的 Check 编号与 `test_procedure` 中对应 Send 步骤编号**完全一致**
+- 没有 Check 的步骤（`Delay`、`Set Voltage` 等）在 `expected_output` 中跳过，序号不连续是正常的
+- `AndCheckResp[...]` 步骤在 `test_procedure` 中计入序号，但**不在** `expected_output` 中单独出现（已内含检查）
+
+**错误格式示例（禁止）：**
+- `test_procedure` 中混入 Check 语句（如 `2.Check DiagData[...]`）——Check 必须在 `expected_output`
+- `expected_output` 只写最后一条 Check，忽略前面所有步骤的 Check
+- 使用 `Step1:` 格式（禁止，必须用 `1.`）
+- 序号与内容之间有空格（`1. Send` 禁止，必须是 `1.Send`）
+
+> **`test_procedure` 和 `expected_output` 字段中，每一行都必须以 `N.` 序号开头，序号与内容之间无空格，行与行之间用 `<br>` 分隔。**
+
+**错误格式示例（禁止）：**
+- `Step1: Send DiagBy[Physical]Data[10 03];`（**严禁使用 `Step1:` 格式**）
+- `Send DiagBy[Physical]Data[10 03];<br>Check DiagData[...]Within[50]ms;`（缺少序号）
+- `1. Send DiagBy[Physical]Data[10 03];`（序号与内容之间不得有空格）
+
+规则细则：
+1. 序号从 `1.` 开始递增，格式为 `1.` `2.` `3.` ...，**中间无空格、无冒号、无其他字符**
+2. 每个 Send / Check / Delay / Set 等操作各占一行，独立编号
+3. `expected_output` 序号与 `test_procedure` 中对应步骤编号一致；仅一行时也必须写 `1.`
+4. `AndCheckResp[...]` 步骤不在 `expected_output` 中单独列出，但在 `test_procedure` 中计入序号
+5. `Delay[...]ms;` 步骤计入 `test_procedure` 序号，不在 `expected_output` 中出现
+
 
 ## 生成分类（共 5 类）
 
@@ -298,18 +330,6 @@ Send DiagBy[Physical]Data[31 01 <RID_H>]WithLen[3];
 
 ---
 
-## 会话进入标准路径
-
-为统一生成，进入各会话的标准路径如下：
-
-| 目标会话 | 标准进入步骤 |
-|---------|------------|
-| Default（0x01） | `Send DiagBy[Physical]Data[10 01];` |
-| Extended（0x03） | `Send DiagBy[Physical]Data[10 01];` → `Delay[1000]ms;` → `Send DiagBy[Physical]Data[10 03];` |
-| Programming（0x02） | `Send DiagBy[Physical]Data[10 01];` → `Delay[1000]ms;` → `Send DiagBy[Physical]Data[10 03];` → `Send DiagBy[Physical]Data[10 02];` |
-
----
-
 ## 功能寻址用例生成规则
 
 当 `Functional Request = 支持` 时：
@@ -324,16 +344,8 @@ Send DiagBy[Physical]Data[31 01 <RID_H>]WithLen[3];
 
 ## 生成注意事项
 
-1. **Case ID 不可重复**，物理寻址 `Diag_0x31_Phy_001` 起递增
-2. **每个 Send 都要有对应 Check**
-3. **RID 列表从 Routine Control 表（Sheet 含 "Routine"/"0x31"）读取**
-4. **每个 RID + 每个 Subfunction 组合各一条用例**（除非不支持）
-5. **OptionData 从 RID 的 Request 参数定义读取**，StartRoutine 通常需要
-6. **StatusByte 含义从 RID 的 Response 参数定义读取**
-7. **有前置条件的 RID 必须生成 Condition Test**
-8. **输出格式严格为 pipe table**，列顺序：`| Case ID | Case名称 | 测试步骤 | 预期输出 |`
-9. **顶级标题使用 `#`**：如 `# 1. Application Service_Physical Addressing`、`# 2. Application Service_Functional Addressing` 等
-10. **分类标题使用 `##`**：如 `## 1.1 Session Layer Test` 等
-11. **各大组之间用 `---` 分隔**
-12. **无符合条件的用例时使用 `>` 引用**
-13. **步骤中换行使用 `<br>` 标记**，不用 `\n`
+1. **RID 列表从 Routine Control 表（Sheet 含 "Routine"/"0x31"）读取**
+2. **每个 RID + 每个 Subfunction 组合各一条用例**（除非不支持）
+3. **OptionData 从 RID 的 Request 参数定义读取**，StartRoutine 通常需要
+4. **StatusByte 含义从 RID 的 Response 参数定义读取**
+5. **有前置条件的 RID 必须生成 Condition Test**
