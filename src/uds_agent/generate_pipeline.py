@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -71,9 +73,73 @@ class UDSGeneratePipeline:
         }
 
     @staticmethod
-    def _cache_key(excel_path: str, service_id: str, domain: str, cache_dir: str) -> Path:
+    def _cache_key(excel_path: str, service_id: str, domain: str, cache_dir: str, params: dict | None = None) -> Path:
         md5 = hashlib.md5(Path(excel_path).read_bytes()).hexdigest()
-        return Path(cache_dir) / f"{md5}_{service_id}_{domain}.json"
+        params_suffix = ""
+        if params:
+            params_suffix = "_" + hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+        return Path(cache_dir) / f"{md5}_{service_id}_{domain}{params_suffix}.json"
+
+    @staticmethod
+    def _replace_p2_placeholder(content: str, params: dict | None, service_id: str) -> str:
+        """将 LLM 输出中的 XX XX XX XX 替换为 P2/P2* 对应的 hex 值。
+
+        替换规则（仅当 P2 和 P2* 都合法时才替换）：
+          P2   → 2字节 hex（大端）
+          P2*  → (P2*/10) → 2字节 hex（大端）
+          示例：P2=50, P2*=1000 → "00 32 00 64"
+        """
+        if not params:
+            return content
+
+        p2_raw = params.get("P2")
+        p2s_raw = params.get("P2*")
+        if p2_raw is None or p2s_raw is None:
+            return content
+
+        try:
+            p2 = int(p2_raw)
+            p2s = int(p2s_raw)
+        except (ValueError, TypeError):
+            logger.warning(f"[{service_id}] P2/P2* 参数不是合法整数: P2={p2_raw}, P2*={p2s_raw}")
+            return content
+
+        if not (0 <= p2 <= 65535 and 0 <= p2s <= 65535):
+            logger.warning(f"[{service_id}] P2/P2* 超出范围(0-65535): P2={p2}, P2*={p2s}")
+            return content
+
+        p2_hex = f"{p2:04X}"
+        p2s_hex = f"{p2s // 10:04X}"
+        replacement = f"{p2_hex[:2]} {p2_hex[2:]} {p2s_hex[:2]} {p2s_hex[2:]}"
+
+        result = re.sub(r'\bXX\s+XX\s+XX\s+XX\b', replacement, content)
+        if result != content:
+            logger.info(f"[{service_id}] P2 占位符已替换: {replacement} (P2={p2}, P2*={p2s})")
+        return result
+
+    @staticmethod
+    def _renumber_case_ids(content: str, service_id: str) -> str:
+        """将 LLM 输出中的 Case ID 按出现顺序重新编号。
+
+        格式：Diag_{service_id}_{Fun|Phy}_{NNN}
+        Fun 和 Phy 分别独立编号，从 001 开始。
+        """
+        pattern = re.compile(rf'Diag_{re.escape(service_id)}_(Fun|Phy)_(\d{{3}})')
+        counters = {"Fun": 0, "Phy": 0}
+
+        def _replace(match: re.Match) -> str:
+            addr_type = match.group(1)
+            counters[addr_type] += 1
+            new_seq = f"{counters[addr_type]:03d}"
+            return f"Diag_{service_id}_{addr_type}_{new_seq}"
+
+        result, count = pattern.subn(_replace, content)
+        if count > 0:
+            logger.info(
+                f"[{service_id}] Case ID 重编号完成: "
+                f"Fun={counters['Fun']}条, Phy={counters['Phy']}条, 共替换{count}处"
+            )
+        return result
 
     def generate(
         self,
@@ -82,6 +148,7 @@ class UDSGeneratePipeline:
         domain: str = "App",
         original_filename: str = "",
         author: str = "",
+        params: dict | None = None,
     ) -> ServiceTestResult:
         """执行完整的生成管道。"""
         start = time.time()
@@ -89,10 +156,7 @@ class UDSGeneratePipeline:
         # 缓存检查
         cache_path = None
         if self._cache_cfg["enabled"]:
-            cache_path = self._cache_key(excel_path, service_id, domain, self._cache_cfg["dir"])
-            if cache_path.exists():
-                logger.info(f"[{service_id}] cache hit: {cache_path.name}")
-                return ServiceTestResult.model_validate_json(cache_path.read_text(encoding="utf-8"))
+            cache_path = self._cache_key(excel_path, service_id, domain, self._cache_cfg["dir"], params)
             if cache_path.exists():
                 logger.info(f"[{service_id}] cache hit: {cache_path.name}")
                 return ServiceTestResult.model_validate_json(cache_path.read_text(encoding="utf-8"))
@@ -176,9 +240,15 @@ class UDSGeneratePipeline:
         _raw_log.write_text(llm_response.content, encoding="utf-8")
         logger.info(f"[{service_id}] LLM 原始输出已保存: {_raw_log}")
 
-        # 6. 解析输出
-        test_cases = parse_test_cases(llm_response.content, service_id)
-        summary = parse_summary(llm_response.content)
+        # 6. 替换 XX XX XX XX 占位符（基于 P2/P2* 参数）
+        content = self._replace_p2_placeholder(llm_response.content, params, service_id)
+
+        # 7. 重编号 Case ID
+        content = self._renumber_case_ids(content, service_id)
+
+        # 8. 解析输出
+        test_cases = parse_test_cases(content, service_id)
+        summary = parse_summary(content)
 
         # 7. 填充配置字段
         author = author or self._gen_config.get("author", "")
